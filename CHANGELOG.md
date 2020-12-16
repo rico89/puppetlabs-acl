@@ -14,10 +14,6 @@ All notable changes to this project will be documented in this file. The format 
 
 [Full Changelog](https://github.com/puppetlabs/puppetlabs-acl/compare/v3.1.1...v3.2.0)
 
-### Added
-
-- pdksync - \(IAC-973\) - Update travis/appveyor to run on new default branch main [\#199](https://github.com/puppetlabs/puppetlabs-acl/pull/199) ([david22swan](https://github.com/david22swan))
-
 ### Fixed
 
 - \(IAC-976\) - Removal of inappropriate terminology [\#203](https://github.com/puppetlabs/puppetlabs-acl/pull/203) ([pmcmaw](https://github.com/pmcmaw))
