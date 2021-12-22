@@ -18,6 +18,7 @@ class Puppet::Provider::Acl
       if Puppet::Util::Platform.windows?
         require Pathname.new(__FILE__).dirname + '../../../../' + 'puppet/type/acl/ace'
         require 'puppet/util/windows/security'
+        require Pathname.new(__FILE__).dirname + '../../../../' + 'puppet_x/puppetlabs/acl/eventlog'
       end
 
       # Used to specify to flush out the SD cache.
@@ -99,6 +100,24 @@ class Puppet::Provider::Acl
         FILE_EXECUTE |
         SYNCHRONIZE
 
+      SDDL_READ_CONTROL    = 0x20000 # RC
+      SDDL_STANDARD_DELETE = 0x10000 # SD
+      SDDL_WRITE_DAC       = 0x40000 # WD
+      SDDL_WRITE_OWNER     = 0x80000 # WO
+
+      EVENTLOG_READ_ACCESS  = 0x01
+      EVENTLOG_WRITE_ACCESS = 0x02
+      EVENTLOG_CLEAR_ACCESS = 0x04
+
+      EVENTLOG_ALL_ACCESS =
+        EVENTLOG_READ_ACCESS |
+        EVENTLOG_WRITE_ACCESS |
+        EVENTLOG_CLEAR_ACCESS |
+        SDDL_STANDARD_DELETE |
+        SDDL_READ_CONTROL |
+        SDDL_WRITE_DAC |
+        SDDL_WRITE_OWNER
+
       @security_descriptor = nil
 
       # Converts an account name into an SID string
@@ -141,14 +160,15 @@ class Puppet::Provider::Acl
 
       # Retrieves permissions of current instance.
       #
+      # @param [Symbol] target_resource_type
       # @return [Array] ACEs of current instance.
-      def get_current_permissions
-        sd = get_security_descriptor(DO_NOT_REFRESH_SD)
+      def get_current_permissions(target_resource_type)
+        sd = get_security_descriptor(target_resource_type)
         permissions = []
         unless sd.nil?
           permissions if sd.dacl.nil?
           sd.dacl.each do |ace|
-            permissions << Puppet::Type::Acl::Ace.new(convert_to_permissions_hash(ace), self)
+            permissions << Puppet::Type::Acl::Ace.new(convert_to_permissions_hash(ace, target_resource_type), self)
           end
         end
         permissions
@@ -157,13 +177,14 @@ class Puppet::Provider::Acl
       # Converts an Ace object into a hash.
       #
       # @param [Puppet::Util::Windows::AccessControlEntry] ace
+      # @param [Symbol] target_resource_type
       # @return [Hash] Supplied ACE in the form of a hash.
-      def convert_to_permissions_hash(ace)
+      def convert_to_permissions_hash(ace, target_resource_type)
         return {} if ace.nil?
 
         sid = ace.sid
         identity = sid_to_name(sid)
-        rights = get_ace_rights_from_mask(ace)
+        rights = get_ace_rights_from_mask(ace, target_resource_type)
         ace_type = get_ace_type(ace)
         child_types = get_ace_child_types(ace)
         affects = get_ace_propagation(ace)
@@ -179,64 +200,96 @@ class Puppet::Provider::Acl
       # Retrieves the access rights from an ACE's access mask.
       #
       # @param [Ace] ace
+      # @param [Symbol] target_resource_type
       # @return [Array] Collection of symbols corresponding to AccessRights
-      def get_ace_rights_from_mask(ace)
+      def get_ace_rights_from_mask(ace, target_resource_type)
         # TODO: v2 check that this is a file type and respond appropriately
         rights = []
         return rights if ace.nil?
         mask_specific_remainder = ace.mask
 
-        # full
-        if (ace.mask & GENERIC_ALL) == GENERIC_ALL ||
-           (ace.mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS
-          rights << :full
-          mask_specific_remainder = 0
-        end
-
-        if rights == []
-          if (ace.mask & FILE_GENERIC_WRITE) == FILE_GENERIC_WRITE
-            rights << :write
-            mask_specific_remainder &= ~FILE_GENERIC_WRITE
-          end
-          if (ace.mask & GENERIC_WRITE) == GENERIC_WRITE
-            rights << :write
-            mask_specific_remainder &= ~GENERIC_WRITE
+        case target_resource_type
+        when :file
+          # full
+          if (ace.mask & GENERIC_ALL) == GENERIC_ALL ||
+             (ace.mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS
+            rights << :full
+            mask_specific_remainder = 0
           end
 
-          if (ace.mask & FILE_GENERIC_READ) == FILE_GENERIC_READ
-            rights << :read
-            mask_specific_remainder &= ~FILE_GENERIC_READ
-          end
-          if (ace.mask & GENERIC_READ) == GENERIC_READ
-            rights << :read
-            mask_specific_remainder &= ~GENERIC_READ
+          if rights == []
+            if (ace.mask & FILE_GENERIC_WRITE) == FILE_GENERIC_WRITE
+              rights << :write
+              mask_specific_remainder &= ~FILE_GENERIC_WRITE
+            end
+            if (ace.mask & GENERIC_WRITE) == GENERIC_WRITE
+              rights << :write
+              mask_specific_remainder &= ~GENERIC_WRITE
+            end
+
+            if (ace.mask & FILE_GENERIC_READ) == FILE_GENERIC_READ
+              rights << :read
+              mask_specific_remainder &= ~FILE_GENERIC_READ
+            end
+            if (ace.mask & GENERIC_READ) == GENERIC_READ
+              rights << :read
+              mask_specific_remainder &= ~GENERIC_READ
+            end
+
+            if (ace.mask & FILE_GENERIC_EXECUTE) == FILE_GENERIC_EXECUTE
+              rights << :execute
+              mask_specific_remainder &= ~FILE_GENERIC_EXECUTE
+            end
+            if (ace.mask & GENERIC_EXECUTE) == GENERIC_EXECUTE
+              rights << :execute
+              mask_specific_remainder &= ~GENERIC_EXECUTE
+            end
           end
 
-          if (ace.mask & FILE_GENERIC_EXECUTE) == FILE_GENERIC_EXECUTE
-            rights << :execute
-            mask_specific_remainder &= ~FILE_GENERIC_EXECUTE
+          # modify
+          # if the rights appending changes above, we'll
+          # need to ensure this check is still good
+          if rights == [:write, :read, :execute] &&
+             (ace.mask & DELETE) == DELETE
+            rights = [:modify]
+            mask_specific_remainder &= ~DELETE
           end
-          if (ace.mask & GENERIC_EXECUTE) == GENERIC_EXECUTE
-            rights << :execute
-            mask_specific_remainder &= ~GENERIC_EXECUTE
+
+          # rights are too specific, use mask
+          if rights == []
+            rights << :mask_specific
+          elsif mask_specific_remainder != 0
+            Puppet.debug("Remainder from #{ace.mask} is #{mask_specific_remainder}")
+            rights = [:mask_specific]
           end
-        end
+        when :eventlog
+          if (ace.mask & EVENTLOG_ALL_ACCESS) == EVENTLOG_ALL_ACCESS
+            rights << :full
+            mask_specific_remainder = 0
+          end
 
-        # modify
-        # if the rights appending changes above, we'll
-        # need to ensure this check is still good
-        if rights == [:write, :read, :execute] &&
-           (ace.mask & DELETE) == DELETE
-          rights = [:modify]
-          mask_specific_remainder &= ~DELETE
-        end
+          if rights == []
+            if (ace.mask & EVENTLOG_CLEAR_ACCESS) == EVENTLOG_CLEAR_ACCESS
+              rights << :clear
+              mask_specific_remainder &= ~EVENTLOG_CLEAR_ACCESS
+            end
+            if (ace.mask & EVENTLOG_WRITE_ACCESS) == EVENTLOG_WRITE_ACCESS
+              rights << :write
+              mask_specific_remainder &= ~EVENTLOG_WRITE_ACCESS
+            end
+            if (ace.mask & EVENTLOG_READ_ACCESS) == EVENTLOG_READ_ACCESS
+              rights << :read
+              mask_specific_remainder &= ~EVENTLOG_READ_ACCESS
+            end
+          end
 
-        # rights are too specific, use mask
-        if rights == []
-          rights << :mask_specific
-        elsif mask_specific_remainder != 0
-          Puppet.debug("Remainder from #{ace.mask} is #{mask_specific_remainder}")
-          rights = [:mask_specific]
+          # rights are too specific, use mask
+          if rights == []
+            rights << :mask_specific
+          elsif mask_specific_remainder != 0
+            Puppet.debug("Remainder from #{ace.mask} is #{mask_specific_remainder}")
+            rights = [:mask_specific]
+          end
         end
 
         rights
@@ -336,14 +389,15 @@ class Puppet::Provider::Acl
       # Converts an array of permissions into a DACL object.
       #
       # @param [Array] permissions Array of ACEs.
+      # @param [Symbol] target_resource_type
       # @return [Puppet::Util::Windows::AccessControlList] ACL of supplied ACEs.
-      def convert_to_dacl(permissions)
+      def convert_to_dacl(permissions, target_resource_type)
         dacl = Puppet::Util::Windows::AccessControlList.new
         return dacl if permissions.nil? || permissions.empty?
 
         permissions.each do |permission|
           sid = get_account_id(permission.identity)
-          mask = get_account_mask(permission)
+          mask = get_account_mask(permission, target_resource_type)
           flags = get_account_flags(permission)
           case permission.perm_type
           when :allow
@@ -361,7 +415,7 @@ class Puppet::Provider::Acl
       # @param [Puppet::Util::Windows::AccessControlEntry] permission
       # @param [Symbol] target_resource_type
       # @return [Integer] Extracted account mask
-      def get_account_mask(permission, target_resource_type = :file)
+      def get_account_mask(permission, target_resource_type)
         return 0 if permission.nil?
         return permission.mask.to_i if permission.mask
         return 0 if permission.rights.nil? || permission.rights.empty?
@@ -393,6 +447,26 @@ class Puppet::Provider::Acl
                      filemask |= FILE_GENERIC_EXECUTE
                    end
 
+                   filemask
+                 end
+               when :eventlog
+                 begin
+                   if permission.rights.include?(:full)
+                     return EVENTLOG_ALL_ACCESS
+                   end
+
+                   filemask = 0x0
+                   if permission.rights.include?(:write)
+                     filemask |= EVENTLOG_WRITE_ACCESS
+                   end
+
+                   if permission.rights.include?(:read)
+                     filemask |= EVENTLOG_READ_ACCESS
+                   end
+
+                   if permission.rights.include?(:clear)
+                     filemask |= EVENTLOG_CLEAR_ACCESS
+                   end
                    filemask
                  end
                end
@@ -444,16 +518,17 @@ class Puppet::Provider::Acl
       #
       # @param [Puppet::Util::Windows::AccessControlList] current_dacl
       # @param [Array] should_aces
+      # @param [Symbol] target_resource_type
       # @param [Boolean] should_purge
       # @param [Boolean] remove_permissions
       # @return [Array] Matching ACEs.
-      def sync_aces(current_dacl, should_aces, should_purge = false, remove_permissions = false)
+      def sync_aces(current_dacl, should_aces, target_resource_type, should_purge = false, remove_permissions = false)
         if remove_permissions
           kept_aces = []
           current_dacl.each do |ace|
             next if ace.inherited?
 
-            current_ace = Puppet::Type::Acl::Ace.new(convert_to_permissions_hash(ace), self)
+            current_ace = Puppet::Type::Acl::Ace.new(convert_to_permissions_hash(ace, target_resource_type), self)
             existing_aces = should_aces.select { |a| a.same?(current_ace) }
             next unless existing_aces.empty?
 
@@ -468,7 +543,7 @@ class Puppet::Provider::Acl
             # TODO: v2 should we warn if we have an existing inherited ace that matches?
             next if ace.inherited?
 
-            current_ace = Puppet::Type::Acl::Ace.new(convert_to_permissions_hash(ace), self)
+            current_ace = Puppet::Type::Acl::Ace.new(convert_to_permissions_hash(ace, target_resource_type), self)
             existing_aces = should_aces.select { |a| a.same?(current_ace) }
             next unless existing_aces.empty?
 
@@ -489,18 +564,20 @@ class Puppet::Provider::Acl
 
       # Retrieves owner from current instance's SecurityDescriptor.
       #
+      # @param [Symbol] target_resource_type
       # @return [String] SID owner.
-      def get_current_owner
-        sd = get_security_descriptor
+      def get_current_owner(target_resource_type)
+        sd = get_security_descriptor(target_resource_type)
 
         sd&.owner
       end
 
       # Retrieves group from current instance's SecurityDescriptor.
       #
+      # @param [Symbol] target_resource_type
       # @return [String] SID group.
-      def get_current_group
-        sd = get_security_descriptor
+      def get_current_group(target_resource_type)
+        sd = get_security_descriptor(target_resource_type)
 
         sd&.group
       end
@@ -546,8 +623,8 @@ class Puppet::Provider::Acl
       end
       alias get_group_name get_account_name
 
-      def inheriting_permissions?
-        sd = get_security_descriptor
+      def inheriting_permissions?(target_resource_type)
+        sd = get_security_descriptor(target_resource_type)
 
         return !sd.protect unless sd.nil?
 
@@ -557,18 +634,25 @@ class Puppet::Provider::Acl
 
       # Retrieves the SecurityDescriptor of the current instance
       #
+      # @param [Symbol] target_resource_type
       # @param [Bool] refresh_sd Whether to refresh the current instance's SecurityDescriptor.
       # @return [Puppet::Util::Windows::SecurityDescriptor] Instance's SecurityDescriptors.
-      def get_security_descriptor(refresh_sd = DO_NOT_REFRESH_SD)
+      def get_security_descriptor(target_resource_type, refresh_sd = DO_NOT_REFRESH_SD)
         refresh_sd ||= false
         if @security_descriptor.nil? || refresh_sd
           sd = nil
-          case @resource[:target_type]
+          case target_resource_type
           when :file
             begin
               sd = Puppet::Util::Windows::Security.get_security_descriptor(@resource[:target]) unless @resource.noop?
             rescue => detail
               raise Puppet::Error, "Failed to get security descriptor for path '#{@resource[:target]}': #{detail}", detail.backtrace
+            end
+          when :eventlog
+            begin
+              sd = PuppetX::Puppetlabs::Acl::Eventlog.get_security_descriptor(@resource[:target])
+            rescue => detail
+              raise Puppet::Error, "Failed to get security descriptor for event_log '#{@resource[:target]}': #{detail}", detail.backtrace
             end
           end
 
@@ -581,19 +665,26 @@ class Puppet::Provider::Acl
       # Sets the instance's SecurityDescriptor
       #
       # @param [Puppet::Util::Windows::SecurityDescriptor] security_descriptor
+      # @param [Symbol] target_resource_type
       # @return [Puppet::Util::Windows::SecurityDescriptor] Returns set SecurityDescriptor
-      def set_security_descriptor(security_descriptor)
-        case @resource[:target_type]
+      def set_security_descriptor(security_descriptor, target_resource_type)
+        case target_resource_type
         when :file
           begin
             Puppet::Util::Windows::Security.set_security_descriptor(@resource[:target], security_descriptor)
           rescue => detail
             raise Puppet::Error, "Failed to set security descriptor for path '#{@resource[:target]}': #{detail}", detail.backtrace
           end
+        when :eventlog
+          begin
+            PuppetX::Puppetlabs::Acl::Eventlog.set_security_descriptor(@resource[:target], security_descriptor)
+          rescue => detail
+            raise Puppet::Error, "Failed to set security descriptor for log '#{@resource[:target]}': #{detail}", detail.backtrace
+          end
         end
 
         # flush out the cached sd
-        get_security_descriptor(REFRESH_SD)
+        get_security_descriptor(target_resource_type, REFRESH_SD)
       end
     end
   end

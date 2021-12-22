@@ -159,7 +159,7 @@ Puppet::Type.newtype(:acl) do
   newparam(:target_type) do
     desc "The type of target for the Acl resource. In the first release
       of ACL, only `file` is allowed. Defaults to `file`."
-    newvalues(:file)
+    newvalues(:file, :eventlog)
     defaultto(:file)
   end
 

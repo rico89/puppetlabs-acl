@@ -16,14 +16,16 @@ class Puppet::Type::Acl
                  0
                when :modify
                  1
-               when :write
+               when :clear
                  2
-               when :read
+               when :write
                  3
-               when :execute
+               when :read
                  4
-               when :mask_specific
+               when :execute
                  5
+               when :mask_specific
+                 6
                end
     end
   end

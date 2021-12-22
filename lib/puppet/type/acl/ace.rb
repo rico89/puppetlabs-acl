@@ -245,7 +245,7 @@ class Puppet::Type::Acl
               'rights',
               validate_non_empty('rights', value),
             ),
-            :full, :modify, :write, :read, :execute, :mask_specific
+            :full, :modify, :clear, :write, :read, :execute, :mask_specific
           ),
         ),
       )

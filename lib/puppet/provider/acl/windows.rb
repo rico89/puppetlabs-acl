@@ -31,6 +31,8 @@ Puppet::Type.type(:acl).provide :windows do
     case @resource[:target_type]
     when :file
       ::File.exist?(@resource[:target])
+    when :eventlog
+      PuppetX::Puppetlabs::Acl::EventLog.exist?(@resource[:target])
     else
       raise Puppet::ResourceError, 'At present only :target_type => :file is supported on Windows.'
     end
@@ -40,8 +42,10 @@ Puppet::Type.type(:acl).provide :windows do
     case @resource[:target_type]
     when :file
       raise Puppet::Error, "ACL cannot create target resources. Target resource will already have a security descriptor on it when created. Ensure target '#{@resource[:target]}' exists." unless ::File.exist?(@resource[:target]) # rubocop:disable Layout/LineLength
+    when :eventlog
+      raise Puppet::Error, "ACL cannot create target resources. Target resource will already have a security descriptor on it when created. Ensure target '#{@resource[:target]}' exists." unless exists? # rubocop:disable Metrics/LineLength
     else
-      raise Puppet::ResourceError, 'At present only :target_type => :file is supported on Windows.'
+      raise Puppet::ResourceError, 'At present only :target_type => :file and :eventlog are supported on Windows.'
     end
   end
 
@@ -65,11 +69,11 @@ Puppet::Type.type(:acl).provide :windows do
   end
 
   def permissions
-    get_current_permissions
+    get_current_permissions(@resource[:target_type])
   end
 
   def permissions=(value)
-    value = update_permissions_if_file(value)
+    value = update_permissions(value, @resource[:target_type])
     unless @resource[:purge] == :listed_permissions
       non_existing_users = []
       value.each do |permission|
@@ -81,10 +85,18 @@ Puppet::Type.type(:acl).provide :windows do
     @property_flush[:permissions] = value
   end
 
-  def update_permissions_if_file(permissions)
-    case @resource[:target_type]
+  def update_permissions(permissions, target_resource_type)
+    case target_resource_type
     when :file
       if File.file?(@resource[:target]) && permissions
+        permissions.each do |perm|
+          if perm.affects == :all
+            perm.affects = :self_only
+          end
+        end
+      end
+    when :eventlog
+      if @resource[:target] && permissions
         permissions.each do |perm|
           if perm.affects == :all
             perm.affects = :self_only
@@ -97,17 +109,17 @@ Puppet::Type.type(:acl).provide :windows do
   end
 
   def permissions_insync?(current, should)
-    should = update_permissions_if_file(should)
+    should = update_permissions(should, @resource[:target_type])
     are_permissions_insync?(current, should, @resource[:purge])
   end
 
   def permissions_should_to_s(should)
     return [] if should.nil? || !should.is_a?(Array)
 
-    sd = get_security_descriptor
+    sd = get_security_descriptor(@resource[:target_type])
     return [] if sd.nil?
 
-    should_aces = sync_aces(sd.dacl, should, @resource[:purge] == :true, @resource[:purge] == :listed_permissions)
+    should_aces = sync_aces(sd.dacl, should, @resource[:target_type], @resource[:purge] == :true, @resource[:purge] == :listed_permissions)
 
     permissions_to_s(should_aces)
   end
@@ -129,7 +141,7 @@ Puppet::Type.type(:acl).provide :windows do
   end
 
   def owner
-    get_current_owner
+    get_current_owner(@resource[:target_type])
   end
 
   def owner=(value)
@@ -147,7 +159,7 @@ Puppet::Type.type(:acl).provide :windows do
   end
 
   def group
-    get_current_group
+    get_current_group(@resource[:target_type])
   end
 
   def group=(value)
@@ -165,7 +177,7 @@ Puppet::Type.type(:acl).provide :windows do
   end
 
   def inherit_parent_permissions
-    inheriting_permissions?
+    inheriting_permissions?(@resource[:target_type])
   end
 
   def inherit_parent_permissions=(value)
@@ -173,7 +185,7 @@ Puppet::Type.type(:acl).provide :windows do
   end
 
   def flush
-    sd = get_security_descriptor
+    sd = get_security_descriptor(@resource[:target_type])
 
     sd.owner = get_account_id(@property_flush[:owner]) if @property_flush[:owner]
     sd.group = get_account_id(@property_flush[:group]) if @property_flush[:group]
@@ -181,8 +193,8 @@ Puppet::Type.type(:acl).provide :windows do
 
     if @property_flush.key?(:inherit_parent_permissions) || @property_flush[:owner] || @property_flush[:group]
       # If owner/group/protect change, we should save the SD and reevaluate for sync of permissions
-      set_security_descriptor(sd)
-      sd = get_security_descriptor
+      set_security_descriptor(sd, @resource[:target_type])
+      sd = get_security_descriptor(@resource[:target_type])
       # Permissions may go out of whack due to a change here. Ensuring
       # we flush them below will help ensure we are in sync on first
       # convergence.
@@ -198,8 +210,8 @@ Puppet::Type.type(:acl).provide :windows do
     # on what the actual permissions are after setting owner, group,
     # and protect.
     if @property_flush[:permissions]
-      dacl = convert_to_dacl(sync_aces(sd.dacl, @property_flush[:permissions], @resource[:purge] == :true, @resource[:purge] == :listed_permissions))
-      set_security_descriptor(Puppet::Util::Windows::SecurityDescriptor.new(sd.owner, sd.group, dacl, sd.protect))
+      dacl = convert_to_dacl(sync_aces(sd.dacl, @property_flush[:permissions], @resource[:target_type], @resource[:purge] == :true, @resource[:purge] == :listed_permissions))
+      set_security_descriptor(Puppet::Util::Windows::SecurityDescriptor.new(sd.owner, sd.group, dacl, sd.protect), @resource[:target_type])
     end
 
     @property_flush.clear
