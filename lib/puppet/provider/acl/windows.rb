@@ -210,7 +210,7 @@ Puppet::Type.type(:acl).provide :windows do
     # on what the actual permissions are after setting owner, group,
     # and protect.
     if @property_flush[:permissions]
-      dacl = convert_to_dacl(sync_aces(sd.dacl, @property_flush[:permissions], @resource[:target_type], @resource[:purge] == :true, @resource[:purge] == :listed_permissions))
+      dacl = convert_to_dacl(sync_aces(sd.dacl, @property_flush[:permissions], @resource[:target_type], @resource[:purge] == :true, @resource[:purge] == :listed_permissions), @resource[:target_type])
       set_security_descriptor(Puppet::Util::Windows::SecurityDescriptor.new(sd.owner, sd.group, dacl, sd.protect), @resource[:target_type])
     end
 
