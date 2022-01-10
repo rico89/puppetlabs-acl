@@ -184,70 +184,57 @@ module PuppetX
           sd
         end
 
-        def set_owner_to_sd_ptr(sd_ptr, owner)
-          Puppet::Util::Windows::SID.string_to_sid_ptr(owner) do |sid_ptr|
-            if SetSecurityDescriptorOwner(sd_ptr, sid_ptr, false) == FFI::WIN32_FALSE
-              raise Puppet::Util::Windows::Error.new(_("Failed to set SecurityDescriptor Owner: #{FFI::LastError.error}"))
-            end
-          end
-          nil
-        end
-
-        def set_group_to_sd_ptr(sd_ptr, group)
-          Puppet::Util::Windows::SID.string_to_sid_ptr(group) do |sid_ptr|
-            if SetSecurityDescriptorGroup(sd_ptr, sid_ptr, false) == FFI::WIN32_FALSE
-              raise Puppet::Util::Windows::Error.new(_("Failed to set SecurityDescriptor Group: #{FFI::LastError.error}"))
-            end
-          end
-          nil
-        end
-
-        def set_dacl_to_sd_ptr(sd_ptr, dacl)
-          FFI::MemoryPointer.new(:byte, get_max_generic_acl_size(dacl.count)) do |acl_ptr|
-            if InitializeAcl(acl_ptr, acl_ptr.size, ACL_REVISION) == FFI::WIN32_FALSE
-              raise Puppet::Util::Windows::Error.new(_('Failed to initialize ACL'))
-            end
-
-            if IsValidAcl(acl_ptr) == FFI::WIN32_FALSE
-              raise Puppet::Util::Windows::Error.new(_('Invalid DACL'))
-            end
-            dacl.each do |ace|
-              case ace.type
-              when Puppet::Util::Windows::AccessControlEntry::ACCESS_ALLOWED_ACE_TYPE
-                add_access_allowed_ace(acl_ptr, ace.mask, ace.sid, ace.flags)
-              when Puppet::Util::Windows::AccessControlEntry::ACCESS_DENIED_ACE_TYPE
-                add_access_denied_ace(acl_ptr, ace.mask, ace.sid, ace.flags)
-              else
-                raise 'We should never get here'
-              end
-            end
-            if SetSecurityDescriptorDacl(sd_ptr, true, acl_ptr, false) == FFI::WIN32_FALSE
-              raise Puppet::Util::Windows::Error.new(_("Failed to set dacl to SecurityDescriptor: #{FFI::LastError.error}"))
-            end
-          end
-          nil
-        end
-
         def set_security_descriptor(event_log, sd)
           FFI::MemoryPointer.new(20) do |sd_ptr|
             if InitializeSecurityDescriptor(sd_ptr, 1) == FFI::WIN32_FALSE
               raise Puppet::Util::Windows::Error.new(_("Failed to initialize SecurityDescriptor: #{FFI::LastError.error}"))
             end
 
-            set_owner_to_sd_ptr(sd_ptr, sd.owner)
-            set_group_to_sd_ptr(sd_ptr, sd.group)
-            set_dacl_to_sd_ptr(sd_ptr, sd.dacl)
+            Puppet::Util::Windows::SID.string_to_sid_ptr(sd.owner) do |owner_sid_ptr|
+              if SetSecurityDescriptorOwner(sd_ptr, owner_sid_ptr, false) == FFI::WIN32_FALSE
+                raise Puppet::Util::Windows::Error.new(_("Failed to set SecurityDescriptor Owner: #{FFI::LastError.error}"))
+              end
 
-            # protected means the object does not inherit aces from its parent
-            flags = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
-            flags |= sd.protect ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION
-
-            FFI::MemoryPointer.new(:pointer) do |sddl_ptr_ptr|
-              FFI::MemoryPointer.new(:ulong) do |sddl_len_ptr|
-                if ConvertSecurityDescriptorToStringSecurityDescriptorW(sd_ptr, 1, flags, sddl_ptr_ptr, sddl_len_ptr) == FFI::WIN32_FALSE
-                  raise Puppet::Util::Windows::Error.new(_("Failed to convert sd to sddl: #{FFI::LastError.error}"))
+              Puppet::Util::Windows::SID.string_to_sid_ptr(sd.group) do |group_sid_ptr|
+                if SetSecurityDescriptorGroup(sd_ptr, group_sid_ptr, false) == FFI::WIN32_FALSE
+                  raise Puppet::Util::Windows::Error.new(_("Failed to set SecurityDescriptor Group: #{FFI::LastError.error}"))
                 end
-                set_sddl(event_log, sddl_ptr_ptr.get_pointer(0))
+
+                FFI::MemoryPointer.new(:byte, get_max_generic_acl_size(sd.dacl.count)) do |acl_ptr|
+                  if InitializeAcl(acl_ptr, acl_ptr.size, ACL_REVISION) == FFI::WIN32_FALSE
+                    raise Puppet::Util::Windows::Error.new(_('Failed to initialize ACL'))
+                  end
+
+                  if IsValidAcl(acl_ptr) == FFI::WIN32_FALSE
+                    raise Puppet::Util::Windows::Error.new(_('Invalid DACL'))
+                  end
+                  sd.dacl.each do |ace|
+                    case ace.type
+                    when Puppet::Util::Windows::AccessControlEntry::ACCESS_ALLOWED_ACE_TYPE
+                      add_access_allowed_ace(acl_ptr, ace.mask, ace.sid, ace.flags)
+                    when Puppet::Util::Windows::AccessControlEntry::ACCESS_DENIED_ACE_TYPE
+                      add_access_denied_ace(acl_ptr, ace.mask, ace.sid, ace.flags)
+                    else
+                      raise 'We should never get here'
+                    end
+                  end
+                  if SetSecurityDescriptorDacl(sd_ptr, true, acl_ptr, false) == FFI::WIN32_FALSE
+                    raise Puppet::Util::Windows::Error.new(_("Failed to set dacl to SecurityDescriptor: #{FFI::LastError.error}"))
+                  end
+
+                  # protected means the object does not inherit aces from its parent
+                  flags = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+                  flags |= sd.protect ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION
+
+                  FFI::MemoryPointer.new(:pointer) do |sddl_ptr_ptr|
+                    FFI::MemoryPointer.new(:ulong) do |sddl_len_ptr|
+                      if ConvertSecurityDescriptorToStringSecurityDescriptorW(sd_ptr, 1, flags, sddl_ptr_ptr, sddl_len_ptr) == FFI::WIN32_FALSE
+                        raise Puppet::Util::Windows::Error.new(_("Failed to convert sd to sddl: #{FFI::LastError.error}"))
+                      end
+                      set_sddl(event_log, sddl_ptr_ptr.get_pointer(0))
+                    end
+                  end
+                end
               end
             end
           end
